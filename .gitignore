@@ -1,0 +1,24 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Env & secrets
+.env
+*.pem
+
+# Runtime data
+chroma_db/
+uploads/
+racks.json
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.log
