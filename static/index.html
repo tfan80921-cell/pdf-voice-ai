@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#0f172a" />
+  <title>PDF Voice AI – Proyectos & Cuadernos</title>
+  <link rel="stylesheet" href="/static/css/styles.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div id="app">
+    <header class="header">
+      <div class="logo">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+          <path d="M9 15h6M9 11h6"/>
+        </svg>
+        <span>PDF Voice AI</span>
+      </div>
+      <div class="header-status" id="statusBadge">Listo</div>
+    </header>
+
+    <div class="workspace">
+      <div class="main-column">
+    <section class="rack-bar">
+      <div class="rack-selector-wrap">
+        <label for="rackSelect">Proyecto</label>
+        <select id="rackSelect"><option value="">— Cargando… —</option></select>
+      </div>
+      <button type="button" id="newRackBtn" class="btn btn-secondary btn-sm">+ Proyecto</button>
+      <button type="button" id="editRackBtn" class="btn btn-secondary btn-sm" title="Editar proyecto">✎</button>
+      <button type="button" id="previewBtn" class="btn btn-secondary btn-sm" title="Mostrar/ocultar panel del proyecto">👁 Panel</button>
+      <button type="button" id="templatesBtn" class="btn btn-secondary btn-sm" title="Plantillas automáticas">📋 Plantillas</button>
+    </section>
+
+    <div class="rack-info" id="rackInfo">
+      <span class="rack-icon" id="rackIcon">📦</span>
+      <div class="rack-info-text">
+        <strong id="rackName">—</strong>
+        <p id="rackDesc" class="rack-desc"></p>
+      </div>
+      <span class="doc-count" id="docCount">0 docs</span>
+    </div>
+
+    <section class="notebooks-bar" id="notebooksBar">
+      <div class="notebooks-header">
+        <span class="notebooks-label">Cuadernos</span>
+        <button type="button" id="newNbBtn" class="btn btn-secondary btn-xs">+ Cuaderno</button>
+      </div>
+      <div class="notebooks-list" id="notebooksList"></div>
+    </section>
+
+    <section class="config-panel" id="configPanel">
+      <div class="config-row">
+        <label for="providerSelect">Proveedor IA</label>
+        <select id="providerSelect">
+          <option value="gemini">Google Gemini</option>
+          <option value="deepseek">DeepSeek</option>
+          <option value="glm">GLM / Zhipu AI</option>
+        </select>
+      </div>
+      <div class="config-row">
+        <label for="apiKeyInput">API Key</label>
+        <div class="api-key-wrap">
+          <input type="password" id="apiKeyInput" placeholder="API key" autocomplete="off" />
+          <button type="button" id="toggleKeyBtn" class="icon-btn">👁</button>
+        </div>
+      </div>
+      <div class="config-row">
+        <label for="uploadNbSelect">Subir archivo al cuaderno</label>
+        <select id="uploadNbSelect"><option value="">— Selecciona cuaderno —</option></select>
+      </div>
+      <div class="config-row">
+        <label>Archivo (PDF o texto)</label>
+        <div class="upload-area">
+          <input type="file" id="fileInput" accept=".pdf,.txt,.md,.csv,.json,.log,application/pdf,text/plain" hidden />
+          <button type="button" id="uploadBtn" class="btn btn-secondary"><span>📄</span> Seleccionar</button>
+          <span id="fileName" class="file-name">Ningún archivo</span>
+        </div>
+      </div>
+      <div class="config-actions">
+        <button type="button" id="indexBtn" class="btn btn-primary" disabled>Indexar en cuaderno</button>
+      </div>
+      <div id="uploadProgress" class="progress hidden"><div class="progress-bar"></div></div>
+    </section>
+
+    <main class="chat-container">
+      <div class="chat-messages" id="chatMessages">
+        <div class="message system">
+          <div class="bubble">
+            <p>👋 Cada <strong>Proyecto</strong> tiene varios <strong>Cuadernos</strong> (ámbitos de conocimiento) y una instrucción de cómo usarlos.</p>
+            <p class="hint">Idioma de voz: <span id="detectedLang">—</span></p>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <footer class="input-area">
+      <div class="input-row">
+        <button type="button" id="voiceBtn" class="voice-btn" title="Hablar">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+            <line x1="8" y1="23" x2="16" y2="23"/>
+          </svg>
+        </button>
+        <input type="text" id="textInput" placeholder="Pregunta al proyecto…" autocomplete="off" />
+        <button type="button" id="sendBtn" class="send-btn" title="Enviar">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="22" y1="2" x2="11" y2="13"/>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
+        </button>
+      </div>
+      <div class="voice-status" id="voiceStatus"></div>
+    </footer>
+
+      </div>
+
+      <aside class="side-preview open" id="sidePreview" aria-label="Preview del proyecto">
+        <div class="side-preview-inner">
+          <div class="preview-header">
+            <div class="preview-title-row">
+              <span class="preview-icon" id="pvIcon">📦</span>
+              <div>
+                <h2 id="pvName">Proyecto</h2>
+                <p class="preview-subtitle" id="pvDesc">Selecciona un proyecto</p>
+              </div>
+            </div>
+            <button type="button" id="pvClose" class="btn btn-secondary btn-sm side-close-btn" title="Cerrar panel">✕</button>
+          </div>
+          <div class="preview-meta">
+            <span class="preview-chip" id="pvDocs">0 docs</span>
+            <span class="preview-chip" id="pvNbCount">0 cuadernos</span>
+            <span class="preview-chip" id="pvId">—</span>
+          </div>
+          <div class="preview-section">
+            <h3>Instrucción de persona</h3>
+            <pre class="preview-block" id="pvSystem">(Sin proyecto)</pre>
+          </div>
+          <div class="preview-section">
+            <h3>Instrucción de funcionamiento</h3>
+            <pre class="preview-block" id="pvOperating">(Sin proyecto)</pre>
+          </div>
+          <div class="preview-section">
+            <h3>Cuadernos</h3>
+            <div class="preview-notebooks" id="pvNotebooks"></div>
+          </div>
+          <div class="preview-section">
+            <h3>Preguntas de prueba</h3>
+            <div class="preview-samples" id="pvSamples"></div>
+          </div>
+          <div class="side-preview-actions">
+            <button type="button" id="pvEdit" class="btn btn-secondary">Editar</button>
+            <button type="button" id="pvChat" class="btn btn-primary">Ir al chat</button>
+          </div>
+        </div>
+      </aside>
+      <div class="side-preview-backdrop hidden" id="sideBackdrop"></div>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="rackModal">
+    <div class="modal">
+      <h2 id="rackModalTitle">Nuevo Proyecto</h2>
+      <div class="form-group"><label>Nombre</label><input type="text" id="rmName" maxlength="80" /></div>
+      <div class="form-group"><label>Icono</label><input type="text" id="rmIcon" maxlength="4" /></div>
+      <div class="form-group"><label>Descripción</label><input type="text" id="rmDesc" maxlength="500" /></div>
+      <div class="form-group"><label>Instrucción de persona</label><textarea id="rmSystem" rows="4"></textarea></div>
+      <div class="form-group"><label>Instrucción de funcionamiento</label><textarea id="rmOperating" rows="5"></textarea></div>
+      <div class="modal-actions">
+        <button type="button" id="rmCancel" class="btn btn-secondary">Cancelar</button>
+        <button type="button" id="rmSave" class="btn btn-primary">Guardar</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="nbModal">
+    <div class="modal">
+      <h2 id="nbModalTitle">Nuevo Cuaderno</h2>
+      <div class="form-group"><label>Nombre</label><input type="text" id="nbName" maxlength="80" /></div>
+      <div class="form-group"><label>Dominio</label><input type="text" id="nbDomain" maxlength="200" /></div>
+      <div class="form-group"><label>Descripción</label><input type="text" id="nbDesc" maxlength="500" /></div>
+      <div class="modal-actions">
+        <button type="button" id="nbCancel" class="btn btn-secondary">Cancelar</button>
+        <button type="button" id="nbSave" class="btn btn-primary">Guardar</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="tplModal">
+    <div class="modal">
+      <h2>Plantillas de proyecto</h2>
+      <p style="font-size:0.85rem;color:var(--text-muted);margin-bottom:12px">Un clic crea el proyecto con persona, cuadernos y documentos semilla.</p>
+      <div id="tplList" class="tpl-list"></div>
+      <hr style="border-color:var(--border);margin:16px 0" />
+      <h3 style="font-size:1rem;margin-bottom:8px">Generar con IA</h3>
+      <div class="form-group"><label>Describe el proyecto</label><textarea id="genBrief" rows="3"></textarea></div>
+      <div class="form-group"><label>Número de cuadernos</label><input type="number" id="genNbCount" min="1" max="8" value="3" /></div>
+      <div class="modal-actions">
+        <button type="button" id="tplCancel" class="btn btn-secondary">Cerrar</button>
+        <button type="button" id="genBtn" class="btn btn-primary">Generar con IA</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
