@@ -22,3 +22,5 @@ racks.json
 .vscode/
 .DS_Store
 *.log
+.neon
+.env.local

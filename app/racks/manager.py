@@ -1,16 +1,6 @@
-"""
-Rack (Project) + Notebook manager.
-
-Hierarchy:
-  Project (Rack)
-    ── system_instruction   → quién es
-    ── operating_instruction → cómo usar los cuadernos
-    ── Notebooks[]
-          ── files (PDF / texto) en ChromaDB con metadata notebook_id
-"""
+"""Rack (Project) + Notebook manager. Only Neon/pgvector (no JSON, no ChromaDB)."""
 from __future__ import annotations
 
-import json
 import logging
 import re
 import unicodedata
@@ -18,7 +8,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.config import settings
+from app.db import session as db_session
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +29,7 @@ def _slugify(text: str) -> str:
 
 
 class RackManager:
-    """CRUD for Projects (Racks) and their Notebooks."""
+    """Only Neon/pgvector persistence (no JSON fallback, no ChromaDB)."""
 
     _instance: Optional["RackManager"] = None
 
@@ -49,136 +43,31 @@ class RackManager:
         if self._initialized:
             return
         self._initialized = True
-        self._store_path = settings.BASE_DIR / "racks.json"
-        self._racks: dict[str, dict] = {}
-        self._load()
+        logger.info("RackManager initialized (Neon-only mode)")
 
-    def _load(self) -> None:
-        if self._store_path.exists():
-            try:
-                data = json.loads(self._store_path.read_text(encoding="utf-8"))
-                self._racks = {r["id"]: r for r in data.get("racks", [])}
-                for r in self._racks.values():
-                    r.setdefault("notebooks", [])
-                    r.setdefault("operating_instruction", "")
-                    r.setdefault("system_instruction", r.get("system_instruction", ""))
-                logger.info("Loaded %d projects from disk", len(self._racks))
-            except Exception as exc:
-                logger.error("Failed to load racks.json: %s", exc)
-                self._racks = {}
-        else:
-            self._seed_examples()
-            self._save()
+    async def initialize_async(self) -> None:
+        async with db_session() as db:
+            migrated = await db.scalar(
+                text("SELECT value FROM app_metadata WHERE key = 'local_projects_migrated'")
+            )
+            if not migrated:
+                # No local JSON data to migrate; Neon is authoritative
+                await db.execute(
+                    text(
+                        "INSERT INTO app_metadata (key, value) VALUES ('local_projects_migrated', 'true') ON CONFLICT (key) DO NOTHING"
+                    )
+                )
 
-    def _save(self) -> None:
-        payload = {
-            "version": 2,
-            "updated_at": _now(),
-            "racks": list(self._racks.values()),
-        }
-        self._store_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+    async def list_racks_async(self) -> list[dict]:
+        async with db_session() as db:
+            return await self._fetch_neon_racks(db)
 
-    def _seed_examples(self) -> None:
-        vet_id = "vet-avicola"
-        legal_id = "consejero-juridico"
+    async def get_async(self, rack_id: str) -> Optional[dict]:
+        async with db_session() as db:
+            racks = await self._fetch_neon_racks(db, rack_id)
+            return racks[0] if racks else None
 
-        self._racks[vet_id] = {
-            "id": vet_id,
-            "name": "Veterinario Avícola",
-            "description": "Especialista en sanidad, nutrición y manejo de aves de corral.",
-            "icon": "🐔",
-            "system_instruction": (
-                "Eres un veterinario avícola con más de 20 años de experiencia. "
-                "Respondes de forma clara, profesional y basada en evidencia. "
-                "Prioriza bienestar animal, bioseguridad y rentabilidad del productor."
-            ),
-            "operating_instruction": (
-                "Tienes varios cuadernos de conocimiento. Úsalos así:\n"
-                "- Cuaderno 'Vacunación y Bioseguridad': protocolos de vacunas, calendarios y medidas de bioseguridad.\n"
-                "- Cuaderno 'Nutrición': formulaciones, requerimientos nutricionales y problemas metabólicos.\n"
-                "- Cuaderno 'Manejo y Producción': densidades, ventilación, iluminación y parámetros productivos.\n"
-                "Si la pregunta cruza varios ámbitos, combina información de los cuadernos relevantes. "
-                "Si un cuaderno no tiene información útil, indícalo y no inventes datos."
-            ),
-            "notebooks": [
-                {
-                    "id": "vacunacion-bioseguridad",
-                    "name": "Vacunación y Bioseguridad",
-                    "description": "Protocolos de vacunas, calendarios y bioseguridad",
-                    "domain": "vacunación aviar, bioseguridad",
-                    "created_at": _now(),
-                    "updated_at": _now(),
-                },
-                {
-                    "id": "nutricion",
-                    "name": "Nutrición",
-                    "description": "Formulaciones y requerimientos nutricionales",
-                    "domain": "nutrición aviar",
-                    "created_at": _now(),
-                    "updated_at": _now(),
-                },
-                {
-                    "id": "manejo-produccion",
-                    "name": "Manejo y Producción",
-                    "description": "Densidades, ventilación, iluminación y producción",
-                    "domain": "manejo productivo avícola",
-                    "created_at": _now(),
-                    "updated_at": _now(),
-                },
-            ],
-            "created_at": _now(),
-            "updated_at": _now(),
-        }
-
-        self._racks[legal_id] = {
-            "id": legal_id,
-            "name": "Consejero Jurídico",
-            "description": "Asesor legal que interpreta documentos y normativa.",
-            "icon": "⚖️",
-            "system_instruction": (
-                "Eres un consejero jurídico experto. Analizas contratos, leyes y "
-                "reglamentos con rigor. Nunca inventas normativa. Si algo no está "
-                "en el contexto, dilo claramente y recomienda consultar la fuente oficial."
-            ),
-            "operating_instruction": (
-                "Tienes cuadernos por área legal. Úsalos así:\n"
-                "- Cuaderno 'Contratos': cláusulas, modelos y jurisprudencia contractual.\n"
-                "- Cuaderno 'Normativa Laboral': estatuto de los trabajadores, convenios.\n"
-                "Cita siempre el cuaderno y el documento de origen cuando sea posible."
-            ),
-            "notebooks": [
-                {
-                    "id": "contratos",
-                    "name": "Contratos",
-                    "description": "Cláusulas, modelos y jurisprudencia contractual",
-                    "domain": "derecho contractual",
-                    "created_at": _now(),
-                    "updated_at": _now(),
-                },
-                {
-                    "id": "normativa-laboral",
-                    "name": "Normativa Laboral",
-                    "description": "Estatuto de los trabajadores y convenios",
-                    "domain": "derecho laboral",
-                    "created_at": _now(),
-                    "updated_at": _now(),
-                },
-            ],
-            "created_at": _now(),
-            "updated_at": _now(),
-        }
-        logger.info("Seeded 2 example projects with notebooks")
-
-    def list_racks(self) -> list[dict]:
-        return sorted(self._racks.values(), key=lambda r: r.get("name", ""))
-
-    def get(self, rack_id: str) -> Optional[dict]:
-        return self._racks.get(rack_id)
-
-    def create(
+    async def create_async(
         self,
         name: str,
         description: str = "",
@@ -187,70 +76,77 @@ class RackManager:
         icon: str = "📦",
         rack_id: Optional[str] = None,
     ) -> dict:
-        rid = rack_id or _slugify(name)
-        base = rid
-        counter = 1
-        while rid in self._racks:
-            rid = f"{base}-{counter}"
-            counter += 1
+        base_id = rack_id or _slugify(name)
+        async with db_session() as db:
+            rack_id = base_id
+            counter = 1
+            while await db.scalar(
+                text("SELECT EXISTS (SELECT 1 FROM projects WHERE id = :id)"),
+                {"id": rack_id},
+            ):
+                rack_id = f"{base_id}-{counter}"
+                counter += 1
+            now = datetime.now(timezone.utc)
+            await db.execute(
+                text(
+                    "INSERT INTO projects (id, name, description, icon, system_instruction, operating_instruction, created_at, updated_at) VALUES (:id, :name, :description, :icon, :system_instruction, :operating_instruction, :created_at, :updated_at)"
+                ),
+                {
+                    "id": rack_id,
+                    "name": name.strip(),
+                    "description": description.strip(),
+                    "icon": icon or "📦",
+                    "system_instruction": system_instruction.strip() or "Eres un asistente experto. Responde basándote únicamente en el contexto de los documentos proporcionados.",
+                    "operating_instruction": operating_instruction.strip(),
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            return (await self._fetch_neon_racks(db, rack_id))[0]
 
-        now = _now()
-        rack = {
-            "id": rid,
-            "name": name.strip(),
-            "description": description.strip(),
-            "system_instruction": system_instruction.strip()
-            or "Eres un asistente experto. Responde basándote únicamente en el contexto de los documentos proporcionados.",
-            "operating_instruction": operating_instruction.strip(),
-            "icon": icon or "📦",
-            "notebooks": [],
-            "created_at": now,
-            "updated_at": now,
+    async def update_async(self, rack_id: str, **fields) -> Optional[dict]:
+        allowed = {"name", "description", "system_instruction", "operating_instruction", "icon"}
+        updates = {
+            key: value.strip() if isinstance(value, str) else value
+            for key, value in fields.items()
+            if key in allowed and value is not None
         }
-        self._racks[rid] = rack
-        self._save()
-        logger.info("Created project '%s' (%s)", rack["name"], rid)
-        return rack
+        async with db_session() as db:
+            existing = await self._fetch_neon_racks(db, rack_id)
+            if not existing:
+                return None
+            if updates:
+                updates["updated_at"] = datetime.now(timezone.utc)
+                updates["rack_id"] = rack_id
+                assignments = ", ".join(f"{key} = :{key}" for key in updates if key != "rack_id")
+                await db.execute(
+                    text(f"UPDATE projects SET {assignments} WHERE id = :rack_id"),
+                    updates,
+                )
+            return (await self._fetch_neon_racks(db, rack_id))[0]
 
-    def update(self, rack_id: str, **fields) -> Optional[dict]:
-        rack = self._racks.get(rack_id)
+    async def delete_async(self, rack_id: str) -> bool:
+        async with db_session() as db:
+            result = await db.execute(
+                text("DELETE FROM projects WHERE id = :id RETURNING id"),
+                {"id": rack_id},
+            )
+            return result.first() is not None
+
+    async def list_notebooks_async(self, rack_id: str) -> list[dict]:
+        rack = await self.get_async(rack_id)
+        return rack["notebooks"] if rack else []
+
+    async def get_notebook_async(self, rack_id: str, notebook_id: str) -> Optional[dict]:
+        rack = await self.get_async(rack_id)
         if not rack:
             return None
-        allowed = {
-            "name",
-            "description",
-            "system_instruction",
-            "operating_instruction",
-            "icon",
-        }
-        for k, v in fields.items():
-            if k in allowed and v is not None:
-                rack[k] = v.strip() if isinstance(v, str) else v
-        rack["updated_at"] = _now()
-        self._save()
-        return rack
+        return next(
+            (nb for nb in rack["notebooks"] if nb["id"] == notebook_id),
+            None,
+        )
 
-    def delete(self, rack_id: str) -> bool:
-        if rack_id not in self._racks:
-            return False
-        del self._racks[rack_id]
-        self._save()
-        logger.info("Deleted project %s", rack_id)
-        return True
-
-    def list_notebooks(self, rack_id: str) -> list[dict]:
-        rack = self._racks.get(rack_id)
-        if not rack:
-            return []
-        return list(rack.get("notebooks", []))
-
-    def get_notebook(self, rack_id: str, notebook_id: str) -> Optional[dict]:
-        for nb in self.list_notebooks(rack_id):
-            if nb["id"] == notebook_id:
-                return nb
-        return None
-
-    def create_notebook(
+    async def create_notebook_async(
         self,
         rack_id: str,
         name: str,
@@ -258,72 +154,173 @@ class RackManager:
         domain: str = "",
         notebook_id: Optional[str] = None,
     ) -> Optional[dict]:
-        rack = self._racks.get(rack_id)
-        if not rack:
-            return None
+        async with db_session() as db:
+            exists = await db.scalar(
+                text("SELECT EXISTS (SELECT 1 FROM projects WHERE id = :id)"),
+                {"id": rack_id},
+            )
+            if not exists:
+                return None
+            base_id = notebook_id or _slugify(name)
+            candidate = base_id
+            counter = 1
+            while await db.scalar(
+                text("SELECT EXISTS (SELECT 1 FROM notebooks WHERE project_id = :project_id AND id = :id)"),
+                {"project_id": rack_id, "id": candidate},
+            ):
+                candidate = f"{base_id}-{counter}"
+                counter += 1
+            now = datetime.now(timezone.utc)
+            result = await db.execute(
+                text(
+                    "INSERT INTO notebooks (id, project_id, name, description, domain, created_at, updated_at) VALUES (:id, :project_id, :name, :description, :domain, :created_at, :updated_at) RETURNING *"
+                ),
+                {
+                    "id": candidate,
+                    "project_id": rack_id,
+                    "name": name.strip(),
+                    "description": description.strip(),
+                    "domain": domain.strip(),
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            await db.execute(
+                text("UPDATE projects SET updated_at = :updated_at WHERE id = :id"),
+                {"updated_at": now, "id": rack_id},
+            )
+            row = result.mappings().one()
+            return {
+                "id": row["id"],
+                "name": row["name"],
+                "description": row["description"],
+                "domain": row["domain"],
+                "created_at": _format_datetime(row["created_at"]),
+                "updated_at": _format_datetime(row["updated_at"]),
+            }
 
-        nid = notebook_id or _slugify(name)
-        existing_ids = {nb["id"] for nb in rack.get("notebooks", [])}
-        base = nid
-        counter = 1
-        while nid in existing_ids:
-            nid = f"{base}-{counter}"
-            counter += 1
-
-        now = _now()
-        nb = {
-            "id": nid,
-            "name": name.strip(),
-            "description": description.strip(),
-            "domain": domain.strip(),
-            "created_at": now,
-            "updated_at": now,
+    async def update_notebook_async(self, rack_id: str, notebook_id: str, **fields) -> Optional[dict]:
+        allowed = {"name", "description", "domain"}
+        updates = {
+            key: value.strip() if isinstance(value, str) else value
+            for key, value in fields.items()
+            if key in allowed and value is not None
         }
-        rack.setdefault("notebooks", []).append(nb)
-        rack["updated_at"] = now
-        self._save()
-        logger.info("Created notebook '%s' in project %s", nb["name"], rack_id)
-        return nb
+        async with db_session() as db:
+            result = await db.execute(
+                text(
+                    "SELECT id FROM notebooks WHERE project_id = :rack_id AND id = :notebook_id"
+                ),
+                {"rack_id": rack_id, "notebook_id": notebook_id},
+            )
+            if not result.first():
+                return None
+            if updates:
+                now = datetime.now(timezone.utc)
+                updates.update(rack_id=rack_id, notebook_id=notebook_id, updated_at=now)
+                assignments = ", ".join(
+                    f"{key} = :{key}" for key in updates
+                    if key not in {"rack_id", "notebook_id"}
+                )
+                await db.execute(
+                    text(f"UPDATE notebooks SET {assignments} WHERE project_id = :rack_id AND id = :notebook_id"),
+                    updates,
+                )
+                await db.execute(
+                    text("UPDATE projects SET updated_at = :updated_at WHERE id = :id"),
+                    {"updated_at": now, "id": rack_id},
+                )
+            result = await db.execute(
+                text(
+                    "SELECT id, name, description, domain, created_at, updated_at FROM notebooks WHERE project_id = :rack_id AND id = :notebook_id"
+                ),
+                {"rack_id": rack_id, "notebook_id": notebook_id},
+            )
+            row = result.mappings().one()
+            return {
+                "id": row["id"],
+                "name": row["name"],
+                "description": row["description"],
+                "domain": row["domain"],
+                "created_at": _format_datetime(row["created_at"]),
+                "updated_at": _format_datetime(row["updated_at"]),
+            }
 
-    def update_notebook(
-        self, rack_id: str, notebook_id: str, **fields
-    ) -> Optional[dict]:
-        rack = self._racks.get(rack_id)
-        if not rack:
-            return None
-        for nb in rack.get("notebooks", []):
-            if nb["id"] == notebook_id:
-                allowed = {"name", "description", "domain"}
-                for k, v in fields.items():
-                    if k in allowed and v is not None:
-                        nb[k] = v.strip() if isinstance(v, str) else v
-                nb["updated_at"] = _now()
-                rack["updated_at"] = _now()
-                self._save()
-                return nb
-        return None
+    async def delete_notebook_async(self, rack_id: str, notebook_id: str) -> bool:
+        async with db_session() as db:
+            result = await db.execute(
+                text(
+                    "DELETE FROM notebooks WHERE project_id = :rack_id AND id = :notebook_id RETURNING id"
+                ),
+                {"rack_id": rack_id, "notebook_id": notebook_id},
+            )
+            if result.first() is None:
+                return False
+            await db.execute(
+                text("UPDATE projects SET updated_at = :updated_at WHERE id = :id"),
+                {"updated_at": datetime.now(timezone.utc), "id": rack_id},
+            )
+            return True
 
-    def delete_notebook(self, rack_id: str, notebook_id: str) -> bool:
-        rack = self._racks.get(rack_id)
-        if not rack:
-            return False
-        notebooks = rack.get("notebooks", [])
-        new_list = [nb for nb in notebooks if nb["id"] != notebook_id]
-        if len(new_list) == len(notebooks):
-            return False
-        rack["notebooks"] = new_list
-        rack["updated_at"] = _now()
-        self._save()
-        logger.info("Deleted notebook %s from project %s", notebook_id, rack_id)
-        return True
-
-    def notebook_catalog_text(self, rack_id: str) -> str:
-        notebooks = self.list_notebooks(rack_id)
+    async def notebook_catalog_text_async(self, rack_id: str) -> str:
+        notebooks = await self.list_notebooks_async(rack_id)
         if not notebooks:
             return "Este proyecto aún no tiene cuadernos."
         lines = []
-        for nb in notebooks:
-            domain = f" (dominio: {nb['domain']})" if nb.get("domain") else ""
-            desc = f" – {nb['description']}" if nb.get("description") else ""
-            lines.append(f"- Cuaderno '{nb['name']}'{domain}{desc}")
+        for notebook in notebooks:
+            domain = f" (dominio: {notebook['domain']})" if notebook.get("domain") else ""
+            description = f" – {notebook['description']}" if notebook.get("description") else ""
+            lines.append(f"- Cuaderno '{notebook['name']}'{domain}{description}")
         return "\n".join(lines)
+
+    async def _fetch_neon_racks(self, db: AsyncSession, rack_id: Optional[str] = None) -> list[dict]:
+        query = """
+            SELECT p.id AS project_id, p.name AS project_name,
+            p.description AS project_description, p.icon AS project_icon,
+            p.system_instruction, p.operating_instruction,
+            p.created_at AS project_created_at, p.updated_at AS project_updated_at,
+            n.id AS notebook_id, n.name AS notebook_name,
+            n.description AS notebook_description, n.domain AS notebook_domain,
+            n.created_at AS notebook_created_at, n.updated_at AS notebook_updated_at
+            FROM projects p
+            LEFT JOIN notebooks n ON n.project_id = p.id
+        """
+        params = {}
+        if rack_id is not None:
+            query += " WHERE p.id = :rack_id"
+            params["rack_id"] = rack_id
+        query += " ORDER BY p.name, p.id, n.created_at, n.id"
+        result = await db.execute(text(query), params)
+        racks_by_id: dict[str, dict] = {}
+        for row in result.mappings():
+            project_id = row["project_id"]
+            rack = racks_by_id.setdefault(
+                project_id,
+                {
+                    "id": project_id,
+                    "name": row["project_name"],
+                    "description": row["project_description"],
+                    "icon": row["project_icon"],
+                    "system_instruction": row["system_instruction"],
+                    "operating_instruction": row["operating_instruction"],
+                    "created_at": _format_datetime(row["project_created_at"]),
+                    "updated_at": _format_datetime(row["project_updated_at"]),
+                    "notebooks": [],
+                },
+            )
+            if row["notebook_id"] is not None:
+                rack["notebooks"].append(
+                    {
+                        "id": row["notebook_id"],
+                        "name": row["notebook_name"],
+                        "description": row["notebook_description"],
+                        "domain": row["notebook_domain"],
+                        "created_at": _format_datetime(row["notebook_created_at"]),
+                        "updated_at": _format_datetime(row["notebook_updated_at"]),
+                    }
+                )
+        return list(racks_by_id.values())
+
+
+def _format_datetime(value) -> str:
+    return value.isoformat() if isinstance(value, datetime) else value

@@ -1,5 +1,6 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
+slowapi==0.1.9
 python-multipart==0.0.9
 pydantic==2.9.2
 pydantic-settings==2.5.2
@@ -16,4 +17,4 @@ sentence-transformers==3.1.1
 sqlalchemy[asyncio]==2.0.36
 asyncpg==0.30.0
 pgvector==0.3.6
-greenlet==3.1.1
+greenlet==3.5.6

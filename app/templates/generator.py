@@ -34,7 +34,7 @@ class ProjectGenerator:
     # Instantiate a built-in template
     # ------------------------------------------------------------------
 
-    def instantiate_template(
+    async def instantiate_template(
         self,
         template_id: str,
         *,
@@ -55,10 +55,10 @@ class ProjectGenerator:
 
         # Avoid id collision: if template id already exists, create with suffix
         desired_id = tpl["id"]
-        if self.racks.get(desired_id):
+        if await self.racks.get_async(desired_id):
             desired_id = None  # let manager slugify a unique id from name
 
-        rack = self.racks.create(
+        rack = await self.racks.create_async(
             name=name_override or tpl["name"],
             description=tpl.get("description", ""),
             system_instruction=tpl.get("system_instruction", ""),
@@ -70,7 +70,7 @@ class ProjectGenerator:
 
         created_notebooks = []
         for nb_def in tpl.get("notebooks", []):
-            nb = self.racks.create_notebook(
+            nb = await self.racks.create_notebook_async(
                 rack_id,
                 name=nb_def["name"],
                 description=nb_def.get("description", ""),
@@ -83,7 +83,7 @@ class ProjectGenerator:
 
             if seed_documents:
                 for seed in nb_def.get("seed_files", []):
-                    self._ingest_text(
+                    await self._ingest_text(
                         rack_id=rack_id,
                         notebook_id=nb["id"],
                         filename=seed["filename"],
@@ -91,7 +91,7 @@ class ProjectGenerator:
                     )
 
         # Reload
-        rack = self.racks.get(rack_id)
+        rack = await self.racks.get_async(rack_id)
         logger.info(
             "Instantiated template '%s' → project '%s' with %d notebooks",
             template_id,
@@ -168,7 +168,7 @@ Reglas:
         data = self._parse_json_response(raw_text)
 
         # Persist
-        rack = self.racks.create(
+        rack = await self.racks.create_async(
             name=data.get("name") or "Proyecto generado",
             description=data.get("description", ""),
             system_instruction=data.get("system_instruction", ""),
@@ -178,7 +178,7 @@ Reglas:
         rack_id = rack["id"]
 
         for nb_data in data.get("notebooks", [])[:num_notebooks]:
-            nb = self.racks.create_notebook(
+            nb = await self.racks.create_notebook_async(
                 rack_id,
                 name=nb_data.get("name") or "Cuaderno",
                 description=nb_data.get("description", ""),
@@ -188,14 +188,14 @@ Reglas:
                 continue
             if seed_documents and nb_data.get("seed_content"):
                 safe_name = re.sub(r"[^\w\-]+", "_", nb["name"].lower())[:40]
-                self._ingest_text(
+                await self._ingest_text(
                     rack_id=rack_id,
                     notebook_id=nb["id"],
                     filename=f"{safe_name}_seed.txt",
                     content=nb_data["seed_content"],
                 )
 
-        rack = self.racks.get(rack_id)
+        rack = await self.racks.get_async(rack_id)
         logger.info("AI-generated project '%s' from brief", rack_id)
         return rack
 
@@ -203,7 +203,7 @@ Reglas:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _ingest_text(
+    async def _ingest_text(
         self, rack_id: str, notebook_id: str, filename: str, content: str
     ) -> None:
         with tempfile.NamedTemporaryFile(
@@ -215,7 +215,7 @@ Reglas:
             tmp.write(content)
             tmp_path = Path(tmp.name)
         try:
-            self.docs.ingest_file(
+            await self.docs.ingest_file_async(
                 tmp_path,
                 original_filename=filename,
                 rack_id=rack_id,

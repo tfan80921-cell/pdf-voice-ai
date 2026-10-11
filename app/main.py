@@ -4,14 +4,22 @@ Projects (Racks) → Notebooks → Files, with persona + operating instructions.
 """
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import AsyncIterator
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.extension import _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.middleware import SlowAPIMiddleware
 
 from app.config import settings
+from app.db import close_db, init_db
 from app.schemas import (
     ChatRequest,
     ChatResponse,
@@ -41,17 +49,36 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pdf-voice-ai")
 
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    try:
+        await init_db()
+        await rack_manager.initialize_async()
+        await doc_manager.initialize_async()
+        yield
+    finally:
+        await close_db()
+
+
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     description="AI system: Projects → Notebooks → Files + voice chat",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
+
+# Rate limiting
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -62,23 +89,23 @@ rack_manager = RackManager()
 project_generator = ProjectGenerator(rack_manager, doc_manager)
 
 
-def _notebook_to_response(rack_id: str, nb: dict) -> NotebookResponse:
+async def _notebook_to_response(rack_id: str, nb: dict) -> NotebookResponse:
     return NotebookResponse(
         id=nb["id"],
         rack_id=rack_id,
         name=nb["name"],
         description=nb.get("description", ""),
         domain=nb.get("domain", ""),
-        document_count=doc_manager.document_count(rack_id, nb["id"]),
+        document_count=await doc_manager.document_count_async(rack_id, nb["id"]),
         created_at=nb.get("created_at", ""),
         updated_at=nb.get("updated_at", ""),
     )
 
 
-def _rack_to_response(rack: dict) -> RackResponse:
+async def _rack_to_response(rack: dict) -> RackResponse:
     rid = rack["id"]
     notebooks = [
-        _notebook_to_response(rid, nb) for nb in rack.get("notebooks", [])
+        await _notebook_to_response(rid, nb) for nb in rack.get("notebooks", [])
     ]
     return RackResponse(
         id=rid,
@@ -89,7 +116,7 @@ def _rack_to_response(rack: dict) -> RackResponse:
         icon=rack.get("icon", "📦"),
         created_at=rack.get("created_at", ""),
         updated_at=rack.get("updated_at", ""),
-        document_count=doc_manager.document_count(rid),
+        document_count=await doc_manager.document_count_async(rid),
         notebooks=notebooks,
     )
 
@@ -99,40 +126,43 @@ async def health():
     return HealthResponse(
         status="ok",
         version=settings.APP_VERSION,
-        racks=len(rack_manager.list_racks()),
-        documents_indexed=doc_manager.document_count(),
+        racks=len(await rack_manager.list_racks_async()),
+        documents_indexed=await doc_manager.document_count_async(),
         providers=AIProviderFactory.available_providers(),
     )
 
 
 @app.get("/api/racks", response_model=list[RackResponse], tags=["Projects"])
 async def list_racks():
-    return [_rack_to_response(r) for r in rack_manager.list_racks()]
+    return [
+        await _rack_to_response(rack)
+        for rack in await rack_manager.list_racks_async()
+    ]
 
 
 @app.post("/api/racks", response_model=RackResponse, status_code=201, tags=["Projects"])
 async def create_rack(body: RackCreate):
-    rack = rack_manager.create(
+    rack = await rack_manager.create_async(
         name=body.name,
         description=body.description,
         system_instruction=body.system_instruction,
         operating_instruction=body.operating_instruction,
         icon=body.icon,
     )
-    return _rack_to_response(rack)
+    return await _rack_to_response(rack)
 
 
 @app.get("/api/racks/{rack_id}", response_model=RackResponse, tags=["Projects"])
 async def get_rack(rack_id: str):
-    rack = rack_manager.get(rack_id)
+    rack = await rack_manager.get_async(rack_id)
     if not rack:
         raise HTTPException(status_code=404, detail=f"Proyecto '{rack_id}' no encontrado")
-    return _rack_to_response(rack)
+    return await _rack_to_response(rack)
 
 
 @app.put("/api/racks/{rack_id}", response_model=RackResponse, tags=["Projects"])
 async def update_rack(rack_id: str, body: RackUpdate):
-    rack = rack_manager.update(
+    rack = await rack_manager.update_async(
         rack_id,
         name=body.name,
         description=body.description,
@@ -142,54 +172,64 @@ async def update_rack(rack_id: str, body: RackUpdate):
     )
     if not rack:
         raise HTTPException(status_code=404, detail=f"Proyecto '{rack_id}' no encontrado")
-    return _rack_to_response(rack)
+    return await _rack_to_response(rack)
 
 
 @app.delete("/api/racks/{rack_id}", tags=["Projects"])
 async def delete_rack(rack_id: str):
-    if not rack_manager.delete(rack_id):
+    if not await rack_manager.delete_async(rack_id):
         raise HTTPException(status_code=404, detail=f"Proyecto '{rack_id}' no encontrado")
-    doc_manager.delete_rack_collection(rack_id)
+    await doc_manager.delete_rack_collection_async(rack_id)
     return {"success": True, "message": f"Proyecto '{rack_id}' eliminado"}
 
 
 @app.get("/api/racks/{rack_id}/notebooks", response_model=list[NotebookResponse], tags=["Notebooks"])
 async def list_notebooks(rack_id: str):
-    if not rack_manager.get(rack_id):
+    if not await rack_manager.get_async(rack_id):
         raise HTTPException(status_code=404, detail=f"Proyecto '{rack_id}' no encontrado")
-    return [_notebook_to_response(rack_id, nb) for nb in rack_manager.list_notebooks(rack_id)]
+    return [
+        await _notebook_to_response(rack_id, notebook)
+        for notebook in await rack_manager.list_notebooks_async(rack_id)
+    ]
 
 
 @app.post("/api/racks/{rack_id}/notebooks", response_model=NotebookResponse, status_code=201, tags=["Notebooks"])
 async def create_notebook(rack_id: str, body: NotebookCreate):
-    nb = rack_manager.create_notebook(rack_id, name=body.name, description=body.description, domain=body.domain)
+    nb = await rack_manager.create_notebook_async(
+        rack_id, name=body.name, description=body.description, domain=body.domain
+    )
     if not nb:
         raise HTTPException(status_code=404, detail=f"Proyecto '{rack_id}' no encontrado")
-    return _notebook_to_response(rack_id, nb)
+    return await _notebook_to_response(rack_id, nb)
 
 
 @app.put("/api/racks/{rack_id}/notebooks/{notebook_id}", response_model=NotebookResponse, tags=["Notebooks"])
 async def update_notebook(rack_id: str, notebook_id: str, body: NotebookUpdate):
-    nb = rack_manager.update_notebook(rack_id, notebook_id, name=body.name, description=body.description, domain=body.domain)
+    nb = await rack_manager.update_notebook_async(
+        rack_id, notebook_id, name=body.name, description=body.description, domain=body.domain
+    )
     if not nb:
         raise HTTPException(status_code=404, detail="Cuaderno o proyecto no encontrado")
-    return _notebook_to_response(rack_id, nb)
+    return await _notebook_to_response(rack_id, nb)
 
 
 @app.delete("/api/racks/{rack_id}/notebooks/{notebook_id}", tags=["Notebooks"])
 async def delete_notebook(rack_id: str, notebook_id: str):
-    if not rack_manager.delete_notebook(rack_id, notebook_id):
+    notebook = await rack_manager.get_notebook_async(rack_id, notebook_id)
+    if not notebook:
         raise HTTPException(status_code=404, detail="Cuaderno o proyecto no encontrado")
-    deleted = doc_manager.clear_notebook(rack_id, notebook_id)
+    deleted = await doc_manager.clear_notebook_async(rack_id, notebook_id)
+    if not await rack_manager.delete_notebook_async(rack_id, notebook_id):
+        raise HTTPException(status_code=404, detail="Cuaderno o proyecto no encontrado")
     return {"success": True, "message": f"Cuaderno eliminado ({deleted} fragmentos borrados)"}
 
 
 @app.post("/api/racks/{rack_id}/notebooks/{notebook_id}/upload", response_model=UploadResponse, tags=["Documents"])
 async def upload_file(rack_id: str, notebook_id: str, file: UploadFile = File(...)):
-    rack = rack_manager.get(rack_id)
+    rack = await rack_manager.get_async(rack_id)
     if not rack:
         raise HTTPException(status_code=404, detail=f"Proyecto '{rack_id}' no encontrado")
-    nb = rack_manager.get_notebook(rack_id, notebook_id)
+    nb = await rack_manager.get_notebook_async(rack_id, notebook_id)
     if not nb:
         raise HTTPException(status_code=404, detail=f"Cuaderno '{notebook_id}' no encontrado")
     if not file.filename:
@@ -207,7 +247,9 @@ async def upload_file(rack_id: str, notebook_id: str, file: UploadFile = File(..
     try:
         with open(dest, "wb") as f:
             f.write(content)
-        result = doc_manager.ingest_file(dest, original_filename=file.filename, rack_id=rack_id, notebook_id=notebook_id)
+        result = await doc_manager.ingest_file_async(
+            dest, original_filename=file.filename, rack_id=rack_id, notebook_id=notebook_id
+        )
         return UploadResponse(
             success=True,
             filename=result["filename"],
@@ -227,12 +269,13 @@ async def upload_file(rack_id: str, notebook_id: str, file: UploadFile = File(..
             dest.unlink(missing_ok=True)
 
 
+@limiter.limit("10/minute")
 @app.post("/api/chat", response_model=ChatResponse, tags=["Chat"])
 async def chat(request: ChatRequest):
-    rack = rack_manager.get(request.rack_id)
+    rack = await rack_manager.get_async(request.rack_id)
     if not rack:
         raise HTTPException(status_code=404, detail=f"Proyecto '{request.rack_id}' no encontrado.")
-    count = doc_manager.document_count(request.rack_id)
+    count = await doc_manager.document_count_async(request.rack_id)
     if count == 0:
         raise HTTPException(status_code=400, detail=f"El proyecto '{rack['name']}' no tiene documentos.")
     notebook_ids = request.notebook_ids
@@ -241,7 +284,7 @@ async def chat(request: ChatRequest):
         invalid = [n for n in notebook_ids if n not in valid]
         if invalid:
             raise HTTPException(status_code=400, detail=f"Cuadernos no encontrados: {invalid}")
-    context, sources, nbs_used = doc_manager.get_context_string(
+    context, sources, nbs_used = await doc_manager.get_context_string_async(
         request.query, rack_id=request.rack_id, notebook_ids=notebook_ids,
     )
     if not context:
@@ -256,7 +299,7 @@ async def chat(request: ChatRequest):
         )
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
-    catalog = rack_manager.notebook_catalog_text(request.rack_id)
+    catalog = await rack_manager.notebook_catalog_text_async(request.rack_id)
     system_prompt, user_prompt = provider.build_rag_prompt(
         context=context,
         query=request.query,
@@ -318,7 +361,7 @@ async def get_template(template_id: str):
 @app.post("/api/templates/{template_id}/instantiate", response_model=GenerateProjectResponse, status_code=201, tags=["Templates"])
 async def instantiate_template(template_id: str, body: InstantiateTemplateRequest = InstantiateTemplateRequest()):
     try:
-        rack = project_generator.instantiate_template(
+        rack = await project_generator.instantiate_template(
             template_id, name_override=body.name_override, seed_documents=body.seed_documents,
         )
     except ValueError as ve:
@@ -329,7 +372,7 @@ async def instantiate_template(template_id: str, body: InstantiateTemplateReques
     return GenerateProjectResponse(
         success=True,
         message=f"Proyecto '{rack['name']}' creado desde plantilla '{template_id}'",
-        project=_rack_to_response(rack),
+        project=await _rack_to_response(rack),
     )
 
 
@@ -353,7 +396,7 @@ async def generate_project(body: GenerateProjectRequest):
     return GenerateProjectResponse(
         success=True,
         message=f"Proyecto '{rack['name']}' generado con IA",
-        project=_rack_to_response(rack),
+        project=await _rack_to_response(rack),
     )
 
 
