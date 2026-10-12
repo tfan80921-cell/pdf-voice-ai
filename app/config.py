@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     HOST: str = "0.0.0.0"
     PORT: int = 8000
+    ALLOWED_ORIGINS: list[str] = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://your-domain.com",
+    ]
+
+    # Database
+    DATABASE_URL: str = ""
 
     # Paths
     BASE_DIR: Path = Path(__file__).resolve().parent.parent

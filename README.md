@@ -25,6 +25,10 @@ python run.py
 
 Abre http://localhost:8000
 
+## Neon (opcional)
+
+Para usar PostgreSQL con pgvector en Ohio, sigue la [guía de configuración de Neon](./NEON.md).
+
 ## Generación automática de proyectos
 
 ### Plantillas listas
