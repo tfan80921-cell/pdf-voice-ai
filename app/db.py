@@ -7,8 +7,10 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from sqlalchemy import text
+from pgvector.asyncpg import register_vector
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -30,12 +32,21 @@ def is_neon_enabled() -> bool:
 
 def _to_async_url(url: str) -> str:
     """Normalize postgres URL for asyncpg."""
-    u = url.strip()
-    if u.startswith("postgres://"):
-        u = "postgresql://" + u[len("postgres://") :]
-    if u.startswith("postgresql://") and "+asyncpg" not in u:
-        u = u.replace("postgresql://", "postgresql+asyncpg://", 1)
-    return u
+    parts = urlsplit(url.strip())
+    scheme = parts.scheme
+    if scheme == "postgres":
+        scheme = "postgresql"
+    if scheme == "postgresql":
+        scheme = "postgresql+asyncpg"
+
+    query = urlencode(
+        [
+            ("ssl" if key == "sslmode" else key, value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            if key != "channel_binding"
+        ]
+    )
+    return urlunsplit(parts._replace(scheme=scheme, query=query))
 
 
 async def init_db() -> None:
@@ -59,6 +70,19 @@ async def init_db() -> None:
 
     async with _engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        raw_connection = await conn.get_raw_connection()
+        await register_vector(raw_connection.driver_connection)
+        event.listen(_engine.sync_engine, "connect", _register_vector_codec)
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS app_metadata (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+        )
         await conn.execute(
             text(
                 """
@@ -79,13 +103,14 @@ async def init_db() -> None:
             text(
                 """
                 CREATE TABLE IF NOT EXISTS notebooks (
-                    id          TEXT PRIMARY KEY,
+                    id          TEXT NOT NULL,
                     project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                     name        TEXT NOT NULL,
                     description TEXT NOT NULL DEFAULT '',
                     domain      TEXT NOT NULL DEFAULT '',
                     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+                    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (project_id, id)
                 )
                 """
             )
@@ -96,13 +121,15 @@ async def init_db() -> None:
                 CREATE TABLE IF NOT EXISTS document_chunks (
                     id           BIGSERIAL PRIMARY KEY,
                     project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-                    notebook_id  TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                    notebook_id  TEXT NOT NULL,
                     filename     TEXT NOT NULL,
                     chunk_index  INT NOT NULL,
                     content      TEXT NOT NULL,
                     embedding    vector(384),
                     doc_hash     TEXT NOT NULL DEFAULT '',
-                    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+                    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    FOREIGN KEY (project_id, notebook_id)
+                        REFERENCES notebooks(project_id, id) ON DELETE CASCADE
                 )
                 """
             )
@@ -115,21 +142,34 @@ async def init_db() -> None:
                 """
             )
         )
-        try:
-            await conn.execute(
-                text(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_chunks_embedding
-                    ON document_chunks
-                    USING ivfflat (embedding vector_cosine_ops)
-                    WITH (lists = 100)
-                    """
-                )
+        await conn.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_unique_document_part
+                ON document_chunks (project_id, notebook_id, filename, doc_hash, chunk_index)
+                """
             )
+        )
+        try:
+            async with conn.begin_nested():
+                await conn.execute(
+                    text(
+                        """
+                        CREATE INDEX IF NOT EXISTS idx_chunks_embedding
+                        ON document_chunks
+                        USING ivfflat (embedding vector_cosine_ops)
+                        WITH (lists = 100)
+                        """
+                    )
+                )
         except Exception as exc:
             logger.warning("Vector index create skipped/deferred: %s", exc)
 
     logger.info("Neon/Postgres schema ready (pgvector)")
+
+
+def _register_vector_codec(dbapi_connection, _connection_record) -> None:
+    dbapi_connection.run_async(register_vector)
 
 
 async def close_db() -> None:

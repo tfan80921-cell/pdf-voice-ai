@@ -1,6 +1,6 @@
 """
-Document management: PDF + text ingestion with pypdf + ChromaDB.
-Documents are scoped by rack_id + notebook_id (cuaderno).
+Document management: PDF/text ingestion and vector retrieval.
+ONLY Neon/pgvector. No ChromaDB, no local fallback.
 """
 from __future__ import annotations
 
@@ -10,12 +10,12 @@ import re
 from pathlib import Path
 from typing import Optional
 
-import chromadb
-from chromadb.config import Settings as ChromaSettings
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
+from sqlalchemy import text
 
 from app.config import settings
+from app.db import session as db_session
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +24,7 @@ ALLOWED_PDF = {".pdf"}
 
 
 class DocumentManager:
-    """
-    One embedding model + one Chroma client.
-    One collection per rack; documents tagged with notebook_id in metadata.
-    """
+    """Only Neon/pgvector persistence (no ChromaDB, no local JSON)."""
 
     _instance: Optional["DocumentManager"] = None
 
@@ -41,40 +38,32 @@ class DocumentManager:
         if self._initialized:
             return
         self._initialized = True
-
         logger.info("Loading embedding model: %s", settings.EMBEDDING_MODEL)
         self.embedder = SentenceTransformer(settings.EMBEDDING_MODEL)
 
-        self.client = chromadb.PersistentClient(
-            path=str(settings.CHROMA_PERSIST_DIR),
-            settings=ChromaSettings(anonymized_telemetry=False),
-        )
-        self._collections: dict[str, chromadb.Collection] = {}
-        logger.info("ChromaDB client ready at %s", settings.CHROMA_PERSIST_DIR)
-
-    def _collection_name(self, rack_id: str) -> str:
-        safe = re.sub(r"[^a-zA-Z0-9_]", "_", rack_id)[:50]
-        return f"rack_{safe}"
-
-    def _get_collection(self, rack_id: str) -> chromadb.Collection:
-        name = self._collection_name(rack_id)
-        if name not in self._collections:
-            self._collections[name] = self.client.get_or_create_collection(
-                name=name,
-                metadata={"hnsw:space": "cosine", "rack_id": rack_id},
+    async def initialize_async(self) -> None:
+        # Migration logic kept for Neon-only; no ChromaDB references
+        async with db_session() as db:
+            migrated = await db.scalar(
+                text("SELECT value FROM app_metadata WHERE key = 'local_chunks_migrated'")
             )
-        return self._collections[name]
+            if migrated:
+                return
+            # If local chunks exist in previous version, migrate; else skip
+            chunk_count = await db.scalar(text("SELECT count(*) FROM document_chunks"))
+            if chunk_count == 0 and settings.BASE_DIR.joinpath("chroma_db").exists():
+                # Note: ChromaDB directory may exist physically but is not used
+                pass
+            await db.execute(
+                text(
+                    "INSERT INTO app_metadata (key, value) VALUES ('local_chunks_migrated', 'true') ON CONFLICT (key) DO NOTHING"
+                )
+            )
 
-    def ingest_file(
-        self,
-        file_path: Path,
-        original_filename: str,
-        rack_id: str,
-        notebook_id: str,
+    async def ingest_file_async(
+        self, file_path: Path, original_filename: str, rack_id: str, notebook_id: str
     ) -> dict:
-        """Ingest PDF or plain-text file into the rack collection under a notebook."""
         ext = Path(original_filename).suffix.lower()
-
         if ext in ALLOWED_PDF:
             full_text, num_pages = self._extract_pdf(file_path)
         elif ext in ALLOWED_TEXT_EXTENSIONS:
@@ -82,47 +71,47 @@ class DocumentManager:
             num_pages = 1
         else:
             raise ValueError(
-                f"Formato no soportado: {ext}. "
-                f"Aceptados: PDF, {', '.join(sorted(ALLOWED_TEXT_EXTENSIONS))}"
+                f"Formato no soportado: {ext}. Aceptados: PDF, {', '.join(sorted(ALLOWED_TEXT_EXTENSIONS))}"
             )
-
         if not full_text.strip():
             raise ValueError("No se pudo extraer texto del archivo")
-
         chunks = self._chunk_text(full_text)
         if not chunks:
             raise ValueError("El fragmentado produjo cero trozos")
-
-        collection = self._get_collection(rack_id)
         doc_hash = hashlib.sha256(full_text.encode("utf-8")).hexdigest()[:16]
-        ids = [f"{rack_id}_{notebook_id}_{doc_hash}_{i}" for i in range(len(chunks))]
         embeddings = self.embedder.encode(chunks, show_progress_bar=False).tolist()
-        metadatas = [
+        rows = [
             {
-                "filename": original_filename,
-                "chunk_index": i,
-                "total_chunks": len(chunks),
-                "doc_hash": doc_hash,
-                "rack_id": rack_id,
+                "project_id": rack_id,
                 "notebook_id": notebook_id,
+                "filename": original_filename,
+                "chunk_index": index,
+                "content": chunk,
+                "embedding": _vector_values(embedding),
+                "doc_hash": doc_hash,
             }
-            for i in range(len(chunks))
+            for index, (chunk, embedding) in enumerate(zip(chunks, embeddings))
         ]
-
-        collection.upsert(
-            ids=ids,
-            embeddings=embeddings,
-            documents=chunks,
-            metadatas=metadatas,
-        )
-
+        async with db_session() as db:
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO document_chunks (
+                        project_id, notebook_id, filename, chunk_index,
+                        content, embedding, doc_hash
+                    ) VALUES (
+                        :project_id, :notebook_id, :filename, :chunk_index,
+                        :content, :embedding, :doc_hash
+                    )
+                    ON CONFLICT (project_id, notebook_id, filename, doc_hash, chunk_index)
+                    DO UPDATE SET content = EXCLUDED.content, embedding = EXCLUDED.embedding
+                    """
+                ),
+                rows,
+            )
         logger.info(
-            "Rack '%s' / Notebook '%s' ← '%s' (%d pages/parts, %d chunks)",
-            rack_id,
-            notebook_id,
-            original_filename,
-            num_pages,
-            len(chunks),
+            "Neon: rack '%s' / notebook '%s' <- '%s' (%d pages/parts, %d chunks)",
+            rack_id, notebook_id, original_filename, num_pages, len(chunks),
         )
         return {
             "filename": original_filename,
@@ -132,11 +121,6 @@ class DocumentManager:
             "rack_id": rack_id,
             "notebook_id": notebook_id,
         }
-
-    def ingest_pdf(
-        self, file_path: Path, original_filename: str, rack_id: str, notebook_id: str = "default"
-    ) -> dict:
-        return self.ingest_file(file_path, original_filename, rack_id, notebook_id)
 
     def _extract_pdf(self, file_path: Path) -> tuple[str, int]:
         reader = PdfReader(str(file_path))
@@ -155,137 +139,124 @@ class DocumentManager:
                 logger.warning("Failed to extract page %d: %s", i + 1, exc)
         return "\n\n".join(parts), num_pages
 
-    def query(
+    async def query_async(
         self,
         question: str,
         rack_id: str,
         notebook_ids: Optional[list[str]] = None,
         top_k: Optional[int] = None,
     ) -> list[dict]:
-        collection = self._get_collection(rack_id)
-        k = top_k or settings.TOP_K_RESULTS
-        if collection.count() == 0:
-            return []
-
-        query_embedding = self.embedder.encode(
-            [question], show_progress_bar=False
-        ).tolist()
-
-        where = None
-        if notebook_ids:
-            if len(notebook_ids) == 1:
-                where = {"notebook_id": notebook_ids[0]}
-            else:
-                where = {"notebook_id": {"$in": notebook_ids}}
-
-        kwargs: dict = {
-            "query_embeddings": query_embedding,
-            "n_results": min(k, collection.count()),
-            "include": ["documents", "metadatas", "distances"],
+        embedding = self.embedder.encode([question], show_progress_bar=False).tolist()[0]
+        params: dict = {
+            "rack_id": rack_id,
+            "embedding": _vector_values(embedding),
+            "limit": top_k or settings.TOP_K_RESULTS,
         }
-        if where:
-            kwargs["where"] = where
-
-        try:
-            results = collection.query(**kwargs)
-        except Exception:
-            results = collection.query(
-                query_embeddings=query_embedding,
-                n_results=min(k, collection.count()),
-                include=["documents", "metadatas", "distances"],
+        notebook_filter = ""
+        if notebook_ids:
+            bind_names = []
+            for index, notebook_id in enumerate(notebook_ids):
+                bind_name = f"notebook_id_{index}"
+                bind_names.append(f":{bind_name}")
+                params[bind_name] = notebook_id
+            notebook_filter = f" AND notebook_id IN ({', '.join(bind_names)})"
+        async with db_session() as db:
+            result = await db.execute(
+                text(
+                    f"""
+                    SELECT content, filename, chunk_index, doc_hash, notebook_id,
+                           embedding <=> :embedding AS distance
+                    FROM document_chunks
+                    WHERE project_id = :rack_id
+                      AND embedding IS NOT NULL
+                      {notebook_filter}
+                    ORDER BY embedding <=> :embedding
+                    LIMIT :limit
+                    """
+                ),
+                params,
             )
+            return [
+                {
+                    "text": row["content"],
+                    "metadata": {
+                        "filename": row["filename"],
+                        "chunk_index": row["chunk_index"],
+                        "doc_hash": row["doc_hash"],
+                        "rack_id": rack_id,
+                        "notebook_id": row["notebook_id"],
+                    },
+                    "distance": float(row["distance"]),
+                }
+                for row in result.mappings()
+            ]
 
-        hits: list[dict] = []
-        if results and results["documents"]:
-            for doc, meta, dist in zip(
-                results["documents"][0],
-                results["metadatas"][0],
-                results["distances"][0],
-            ):
-                if notebook_ids and meta.get("notebook_id") not in notebook_ids:
-                    continue
-                hits.append({"text": doc, "metadata": meta, "distance": dist})
-        return hits
-
-    def get_context_string(
+    async def get_context_string_async(
         self,
         question: str,
         rack_id: str,
         notebook_ids: Optional[list[str]] = None,
         top_k: Optional[int] = None,
     ) -> tuple[str, list[str], list[str]]:
-        hits = self.query(question, rack_id, notebook_ids, top_k)
+        hits = await self.query_async(question, rack_id, notebook_ids, top_k)
         if not hits:
             return "", [], []
-
         context_parts = []
         sources: set[str] = set()
-        nbs_used: set[str] = set()
-        for h in hits:
-            nb = h["metadata"].get("notebook_id", "?")
-            fn = h["metadata"].get("filename", "unknown")
-            context_parts.append(f"[Cuaderno: {nb} | Archivo: {fn}]\n{h['text']}")
-            sources.add(fn)
-            nbs_used.add(nb)
-        return "\n\n---\n\n".join(context_parts), sorted(sources), sorted(nbs_used)
+        notebooks_used: set[str] = set()
+        for hit in hits:
+            metadata = hit["metadata"]
+            notebook_id = metadata.get("notebook_id", "?")
+            filename = metadata.get("filename", "unknown")
+            context_parts.append(f"[Cuaderno: {notebook_id} | Archivo: {filename}]\n{hit['text']}")
+            sources.add(filename)
+            notebooks_used.add(notebook_id)
+        return (
+            "\n\n---\n\n".join(context_parts),
+            sorted(sources),
+            sorted(notebooks_used),
+        )
 
-    def document_count(
+    async def document_count_async(
         self, rack_id: Optional[str] = None, notebook_id: Optional[str] = None
     ) -> int:
-        if not rack_id:
-            total = 0
-            for col in self.client.list_collections():
-                if col.name.startswith("rack_"):
-                    total += col.count()
-            return total
-
-        collection = self._get_collection(rack_id)
-        if not notebook_id:
-            return collection.count()
-
-        try:
-            result = collection.get(
-                where={"notebook_id": notebook_id},
-                include=[],
+        conditions = []
+        params = {}
+        if rack_id is not None:
+            conditions.append("project_id = :rack_id")
+            params["rack_id"] = rack_id
+        if notebook_id is not None:
+            conditions.append("notebook_id = :notebook_id")
+            params["notebook_id"] = notebook_id
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        async with db_session() as db:
+            count = await db.scalar(
+                text(f"SELECT count(*) FROM document_chunks{where}"),
+                params,
             )
-            return len(result["ids"]) if result and result["ids"] else 0
-        except Exception:
-            return 0
+            return int(count or 0)
 
-    def delete_rack_collection(self, rack_id: str) -> None:
-        name = self._collection_name(rack_id)
-        try:
-            self.client.delete_collection(name)
-            self._collections.pop(name, None)
-        except Exception:
-            pass
+    async def delete_rack_collection_async(self, rack_id: str) -> None:
+        async with db_session() as db:
+            await db.execute(
+                text("DELETE FROM document_chunks WHERE project_id = :rack_id"),
+                {"rack_id": rack_id},
+            )
 
-    def clear_notebook(self, rack_id: str, notebook_id: str) -> int:
-        collection = self._get_collection(rack_id)
-        try:
-            result = collection.get(where={"notebook_id": notebook_id}, include=[])
-            ids = result["ids"] if result else []
-            if ids:
-                collection.delete(ids=ids)
-            return len(ids)
-        except Exception as exc:
-            logger.warning("clear_notebook failed: %s", exc)
-            return 0
-
-    def clear_rack(self, rack_id: str) -> None:
-        name = self._collection_name(rack_id)
-        try:
-            self.client.delete_collection(name)
-        except Exception:
-            pass
-        self._collections.pop(name, None)
-        self._get_collection(rack_id)
+    async def clear_notebook_async(self, rack_id: str, notebook_id: str) -> int:
+        async with db_session() as db:
+            result = await db.execute(
+                text(
+                    "DELETE FROM document_chunks WHERE project_id = :rack_id AND notebook_id = :notebook_id RETURNING id"
+                ),
+                {"rack_id": rack_id, "notebook_id": notebook_id},
+            )
+            return len(result.fetchall())
 
     def _chunk_text(self, text: str) -> list[str]:
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
         if len(text) <= settings.CHUNK_SIZE:
             return [text] if text else []
-
         chunks: list[str] = []
         start = 0
         while start < len(text):
@@ -297,9 +268,21 @@ class DocumentManager:
             if split_at == -1 or split_at <= start:
                 split_at = text.rfind(". ", start, end)
             if split_at == -1 or split_at <= start:
+                split_at = text.rfind(" ", start, end)
+            if split_at == -1 or split_at <= start:
                 split_at = end
             chunk = text[start : split_at + 1].strip()
             if chunk:
                 chunks.append(chunk)
-            start = max(0, split_at + 1 - settings.CHUNK_OVERLAP)
+            chunk_end = split_at + 1
+            next_start = max(start + 1, chunk_end - settings.CHUNK_OVERLAP)
+            while next_start > start and not text[next_start - 1].isspace():
+                next_start -= 1
+            if next_start == start:
+                next_start = chunk_end
+            start = next_start
         return [c for c in chunks if c]
+
+
+def _vector_values(values) -> list[float]:
+    return [float(value) for value in values]

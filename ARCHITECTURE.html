@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Arquitectura PDF Voice AI</title>
+<style>
+body{font-family:sans-serif;max-width:1100px;margin:0 auto;padding:24px;color:#1e293b}
+h1{color:#1e3a8a;border-bottom:3px solid #3b82f6;padding-bottom:8px}
+h2{color:#1e3a8a;margin-top:32px}
+h3{color:#3b82f6}
+table{border-collapse:collapse;width:100%;margin:16px 0}
+th,td{border:1px solid #cbd5e1;padding:8px 12px;text-align:left;vertical-align:top}
+th{background:#eff6ff}
+code{background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:0.9em}
+pre{background:#0f172a;color:#f1f5f9;padding:16px;border-radius:8px;overflow-x:auto}
+svg{max-width:100%}
+.card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:12px 0}
+.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:0.75rem;font-weight:600}
+.b-green{background:#dcfce7;color:#166534}
+.b-blue{background:#dbeafe;color:#1e40af}
+.b-purple{background:#f3e8ff;color:#6b21a8}
+.b-orange{background:#fef3c7;color:#92400e}
+</style>
+</head>
+<body>
+
+<h1>PDF Voice AI - Arquitectura del Sistema</h1>
+<p>Sistema de IA agnóstico (Gemini / DeepSeek / GLM) para chat de voz sobre documentos, organizado como <strong>Proyectos (Racks) &rarr; Cuadernos &rarr; Archivos</strong>.</p>
+
+<div class="card">
+<span class="badge b-green">Stack</span>
+<h3>Tecnologías</h3>
+<table>
+<tr><th>Tecnología</th><th>Versión</th><th>Uso</th></tr>
+<tr><td><code>FastAPI</code></td><td>0.115.0</td><td>Framework web / API REST</td></tr>
+<tr><td><code>Uvicorn</code></td><td>0.30.6</td><td>Servidor ASGI</td></tr>
+<tr><td><code>Pydantic</code></td><td>2.9.2</td><td>Validación de esquemas</td></tr>
+<tr><td><code>Pydantic Settings</code></td><td>2.5.2</td><td>Configuración por variables de entorno</td></tr>
+<tr><td><code>SQLAlchemy (async)</code></td><td>2.0.36</td><td>ORM base de datos</td></tr>
+<tr><td><code>asyncpg</code></td><td>0.30.0</td><td>Driver PostgreSQL</td></tr>
+<tr><td><code>pgvector</code></td><td>0.3.6</td><td>Vectores en PostgreSQL</td></tr>
+<tr><td><code>ChromaDB</code></td><td>0.5.5</td><td>Vector store local (fallback)</td></tr>
+<tr><td><code>sentence-transformers</code></td><td>3.1.1</td><td>Embeddings (all-MiniLM-L6-v2, 384d)</td></tr>
+<tr><td><code>google-generativeai</code></td><td>0.8.2</td><td>Provider Gemini</td></tr>
+<tr><td><code>openai</code></td><td>1.51.0</td><td>Providers DeepSeek / GLM (OpenAI-compatible)</td></tr>
+<tr><td><code>pypdf</code></td><td>5.0.1</td><td>Extracción de texto PDF</td></tr>
+<tr><td><code>slowapi</code></td><td>-</td><td>Rate limiting</td></tr>
+<tr><td><code>httpx</code></td><td>0.27.2</td><td>HTTP client</td></tr>
+<tr><td><code>numpy</code></td><td>1.26.4</td><td>Operaciones numéricas</td></tr>
+<tr><td><code>aiofiles</code></td><td>24.1.0</td><td>Archivos asíncronos</td></tr>
+<tr><td><code>python-dotenv</code></td><td>1.0.1</td><td>Carga de .env</td></tr>
+<tr><td><code>python-multipart</code></td><td>0.0.9</td><td>Formularios</td></tr>
+</table>
+</div>
+<h2>1. Arquitectura General (Capas)</h2>
+
+<pre>
+┌─────────────────────────────────────────────────────────────────┐
+│                        FRONTEND (Navegador)                      │
+│  static/index.html  +  static/css/styles.css  +  static/js/app.js│
+│  - Selección de proyecto, cuadernos, subida de archivos          │
+│  - Chat de voz (Web Speech API + SpeechSynthesis)                │
+│  - Panel lateral de previsualización del proyecto               │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │ HTTP / REST API (JSON)
+                               │ Puerto 8000
+┌──────────────────────────────▼──────────────────────────────────┐
+│                     FASTAPI (app/main.py)                        │
+│  - CORS, Rate Limiting (slowapi), lifespan (init_db)            │
+│  - Rutas: /api/racks, /api/chat, /api/templates, /api/health    │
+└──────┬──────────────────────────────┬───────────────────────────┘
+       │                              │
+┌──────▼──────────┐          ┌────────▼──────────────────────────┐
+│  RackManager    │          │  DocumentManager (RAG)            │
+│  Proyectos +    │          │  - Ingesta PDF/texto              │
+│  Cuadernos      │          │  - Chunking + embeddings          │
+│  (JSON o Neon)  │          │  - Búsqueda vectorial (cosine)    │
+└──────┬──────────┘          └────────┬──────────────────────────┘
+       │                              │
+       │                     ┌────────▼──────────────────────────┐
+       │                     │  Base de Datos                    │
+       │                     │  Neon Postgres + pgvector         │
+       │                     │  O ChromaDB local (fallback)      │
+       └──────────────────────┴──────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    AI PROVIDERS (Factory Pattern)                 │
+│  GeminiProvider  │  DeepSeekProvider  │  GLMProvider            │
+│  (google-generativeai)  │  (OpenAI-compatible SDK)          │
+└─────────────────────────────────────────────────────────────────┘
+
+<h2>2. Módulos del Backend (<code>app/</code>)</h2>
+
+<table>
+<tr><th>Módulo</th><th>Archivo</th><th>Responsabilidad</th><th>Clases</th></tr>
+<tr><td>Config</td><td><code>app/config.py</code></td><td>Configuración central (pydantic-settings)</td><td><code>Settings</code></td></tr>
+<tr><td>Base de Datos</td><td><code>app/db.py</code></td><td>Conexión Neon + bootstrap de esquema pgvector</td><td><code>init_db, close_db, session</code></td></tr>
+<tr><td>Esquemas</td><td><code>app/schemas.py</code></td><td>Modelos Pydantic (request/response)</td><td><code>RackCreate, NotebookCreate, ChatRequest…</code></td></tr>
+<tr><td>App Principal</td><td><code>app/main.py</code></td><td>FastAPI: rutas, CORS, rate limiting, lifespan</td><td><code>app</code> (FastAPI instance)</td></tr>
+<tr><td>AI Providers</td><td><code>app/ai/</code></td><td>Factory + providers de IA</td><td><code>AIProviderFactory, BaseAIProvider, GeminiProvider, DeepSeekProvider, GLMProvider</code></td></tr>
+<tr><td>Racks</td><td><code>app/racks/manager.py</code></td><td>CRUD de Proyectos y Cuadernos (JSON o Neon)</td><td><code>RackManager</code></td></tr>
+<tr><td>Documentos</td><td><code>app/documents/manager.py</code></td><td>Ingesta, chunking, embeddings, búsqueda vectorial</td><td><code>DocumentManager</code></td></tr>
+<tr><td>Plantillas</td><td><code>app/templates/</code></td><td>Catalog + generador de proyectos</td><td><code>TemplateCatalog, ProjectGenerator</code></td></tr>
+</table>
+
+<h2>3. Módulos del Frontend (<code>static/</code>)</h2>
+
+<table>
+<tr><th>Archivo</th><th>Líneas</th><th>Funcionalidad</th></tr>
+<tr><td><code>static/index.html</code></td><td>213</td><td>Estructura de la app: header, barra de proyectos, cuadernos, panel de config, chat, panel lateral, modales</td></tr>
+<tr><td><code>static/css/styles.css</code></td><td>598</td><td>Diseño mobile-first, responsive, tema oscuro (variables CSS)</td></tr>
+<tr><td><code>static/js/app.js</code></td><td>833</td><td>Lógica de la SPA: fetch a la API, voz (SpeechRecognition + SpeechSynthesis), renderizado dinámico</td></tr>
+</table>
+
+<h2>4. Diagrama de Flujo: Chat con RAG</h2>
+
+<pre>
+1. Usuario escribe pregunta (o habla por voz)
+        │
+        ▼
+2. POST /api/chat  {query, rack_id, provider, api_key, …}
+        │
+        ▼
+3. RackManager.get_async(rack_id)  → validación de proyecto
+        │
+        ▼
+4. DocumentManager.get_context_string_async(query, rack_id, notebook_ids)
+        │
+        ├─► query_async() → embedding de la pregunta (sentence-transformers)
+        │         │
+        │         ├─ Neon:  SELECT … WHERE project_id = rack_id ORDER BY embedding <=> :embedding
+        │         │           LIMIT :limit
+        │         │
+        │         └─ Chroma: collection.query(query_embeddings=…, n_results=k, where=…)
+        │
+        ▼
+5. Contexto recuperado (fragmentos etiquetados por cuaderno y archivo)
+        │
+        ▼
+6. AIProviderFactory.create(provider) → proveedor concreto
+        │
+        ▼
+7. provider.build_rag_prompt(context, query, system_instruction, operating_instruction, notebook_catalog)
+        │
+        ▼
+8. provider.generate(system_prompt, user_prompt) → (answer, tokens)
+        │
+        ▼
+9. ChatResponse { answer, provider, model, sources, notebooks_used, tokens_used }
+        │
+        ▼
+10. Frontend muestra respuesta + fuentes + reproduce voz (SpeechSynthesis)
+
+<h2>5. Esquema de Base de Datos (Neon / pgvector)</h2>
+
+<pre>
+┌─────────────────────┐
+│      projects       │
+│  id (PK)            │
+│  name               │
+│  description        │
+│  icon               │
+│  system_instruction │  ← "Quién es el asistente"
+│  operating_instruction │ ← "Cómo usar los cuadernos"
+│  created_at         │
+│  updated_at         │
+└────────┬────────────┘
+         │ 1..N
+         ▼
+┌─────────────────────┐
+│     notebooks       │
+│  project_id (PK,FK) │
+│  id (PK)            │
+│  name               │
+│  description        │
+│  domain             │
+│  created_at         │
+│  updated_at         │
+└────────┬────────────┘
+         │ 1..N
+         ▼
+┌──────────────────────────────┐
+│    document_chunks           │
+│  id (BIGSERIAL PK)           │
+│  project_id (FK)             │
+│  notebook_id (FK)            │
+│  filename                    │
+│  chunk_index                 │
+│  content (TEXT)              │
+│  embedding (vector(384))     │
+│  doc_hash                    │
+│  created_at                  │
+└──────────────────────────────┘
+
+Índices:
+  - idx_chunks_project_notebook  (project_id, notebook_id)
+  - idx_chunks_unique_document_part  UNIQUE (project_id, notebook_id, filename, doc_hash, chunk_index)
+  - idx_chunks_embedding  IVFFLAT (embedding vector_cosine_ops) lists=100
+
+<h2>6. API REST - Endpoints</h2>
+
+<table>
+<tr><th>Método</th><th>Endpoint</th><th>Tag</th><th>Descripción</th></tr>
+<tr><td>GET</td><td><code>/api/health</code></td><td>System</td><td>Estado del sistema, proveedores, docs indexados</td></tr>
+<tr><td>GET</td><td><code>/api/racks</code></td><td>Projects</td><td>Listar proyectos</td></tr>
+<tr><td>POST</td><td><code>/api/racks</code></td><td>Projects</td><td>Creар proyecto (RackCreate)</td></tr>
+<tr><td>GET</td><td><code>/api/racks/{id}</code></td><td>Projects</td><td>Obtener proyecto</td></tr>
+<tr><td>PUT</td><td><code>/api/racks/{id}</code></td><td>Projects</td><td>Editar proyecto</td></tr>
+<tr><td>DELETE</td><td><code>/api/racks/{id}</code></td><td>Projects</td><td>Eliminar proyecto + colección</td></tr>
+<tr><td>GET</td><td><code>/api/racks/{id}/notebooks</code></td><td>Notebooks</td><td>Listar cuadernos</td></tr>
+<tr><td>POST</td><td><code>/api/racks/{id}/notebooks</code></td><td>Notebooks</td><td>Creар cuaderno</td></tr>
+<tr><td>PUT</td><td><code>/api/racks/{id}/notebooks/{nb}</code></td><td>Notebooks</td><td>Editar cuaderno</td></tr>
+<tr><td>DELETE</td><td><code>/api/racks/{id}/notebooks/{nb}</code></td><td>Notebooks</td><td>Eliminar cuaderno + sus archivos</td></tr>
+<tr><td>POST</td><td><code>/api/racks/{id}/notebooks/{nb}/upload</code></td><td>Documents</td><td>Subir archivo (PDF/txt) e indexar</td></tr>
+<tr><td>POST</td><td><code>/api/chat</code></td><td>Chat</td><td>Chat RAG con proveedor de IA (rate limit 10/min)</td></tr>
+<tr><td>GET</td><td><code>/api/templates</code></td><td>Templates</td><td>Listar plantillas</td></tr>
+<tr><td>GET</td><td><code>/api/templates/{id}</code></td><td>Templates</td><td>Ver plantilla</td></tr>
+<tr><td>POST</td><td><code>/api/templates/{id}/instantiate</code></td><td>Templates</td><td>Instanciar plantilla (crea proyecto + cuadernos + docs semilla)</td></tr>
+<tr><td>POST</td><td><code>/api/projects/generate</code></td><td>Templates</td><td>Generar proyecto con IA desde un brief</td></tr>
+</table>
+
+<h2>7. Plantillas Incorporadas</h2>
+
+<table>
+<tr><th>ID</th><th>Nombre</th><th>Categoría</th><th>Cuadernos</th></tr>
+<tr><td><code>vet-avicola-200</code></td><td>Veterinario Avícola – Lote 200</td><td>agropecuaria</td><td>3 (Vacunación, Nutrición, Manejo)</td></tr>
+<tr><td><code>consejero-juridico</code></td><td>Consejero Jurídico</td><td>legal</td><td>2 (Contratos, Normativa Laboral)</td></tr>
+<tr><td><code>nutricionista-deportivo</code></td><td>Nutricionista Deportivo</td><td>salud</td><td>3 (Requerimientos, Menús, Suplementación)</td></tr>
+<tr><td><code>mantenimiento-industrial</code></td><td>Técnico de Mantenimiento Industrial</td><td>industrial</td><td>3 (Seguridad LOTO, Mecánico, Eléctrico)</td></tr>
+</table>
+
+<h2>8. Providers de IA - Factory Pattern</h2>
+
+<pre>
+AIProviderFactory.create(provider, api_key, model, **kwargs)
+        │
+        ├─ AIProvider.GEMINI   → GeminiProvider       (google-generativeai SDK)
+        ├─ AIProvider.DEEPSEEK → DeepSeekProvider     (OpenAI-compatible, api.deepseek.com)
+        └─ AIProvider.GLM      → GLMProvider          (OpenAI-compatible, open.bigmodel.cn)
+
+BaseAIProvider (ABC)
+  - __init__(api_key, model, temperature, max_tokens)
+  - abstract: provider_name, default_model, generate(system, user) → (text, tokens)
+  - build_rag_prompt(context, query, language, system_instruction, operating_instruction, notebook_catalog)
+
+<h2>9. Flujo de Ingesta de Documentos</h2>
+
+<pre>
+Archivo subido (PDF / txt / md / csv / json / log)  ≤ 50 MB
+        │
+        ▼
+1. Validación: extensión permitida + tamaño
+        │
+        ▼
+2. Extracción de texto
+   - PDF: pypdf.PdfReader → texto por página, máximo 500 páginas
+   - Texto: lectura directa
+        │
+        ▼
+3. Chunking (_chunk_text)
+   - Límite: CHUNK_SIZE = 1000 chars, solapamiento CHUNK_OVERLAP = 200
+   - División en párrafos (\n\n) o frases (. )
+        │
+        ▼
+4. Embeddings: sentence-transformers (all-MiniLM-L6-v2) → 384 dimensiones
+        │
+        ▼
+5. Persistencia:
+   - Neon: INSERT INTO document_chunks (…, embedding vector(384), …)
+             ON CONFLICT (project_id, notebook_id, filename, doc_hash, chunk_index) DO UPDATE
+   - Chroma: collection.upsert(ids, embeddings, documents, metadatas)
+        │
+        ▼
+6. doc_hash = sha256(texto)[:16] → deduplicación automática
+
+<h2>10. Doble Motor: Local vs Neon</h2>
+
+<table>
+<tr><th>Aspecto</th><th>Local (JSON + ChromaDB)</th><th>Neon (Postgres + pgvector)</th></tr>
+<tr><td>Activación</td><td><code>DATABASE_URL</code> vacío</td><td><code>DATABASE_URL</code> configurado</td></tr>
+<tr><td>Proyectos</td><td><code>racks.json</code> en disco</td><td>Tabla <code>projects</code></td></tr>
+<tr><td>Cuadernos</td><td>JSON embebido</td><td>Tabla <code>notebooks</code></td></tr>
+<tr><td>Documentos</td><td>ChromaDB (carpeta <code>chroma_db/</code>)</td><td>Tabla <code>document_chunks</code></td></tr>
+<tr><td>Búsqueda</td><td><code>collection.query(…)</code></td><td><code>SELECT … ORDER BY embedding &lt;=&gt; :embedding</code></td></tr>
+<tr><td>Migración</td><td>—</td><td>Al activar Neon, migra racks.json y Chroma automático (<code>initialize_async</code>)</td></tr>
+</table>
+
+<h2>11. Configuración (.env)</h2>
+
+<pre>
+# Dejar vacío para modo local (JSON + ChromaDB)
+DATABASE_URL=
+
+# O configurar Neon:
+# DATABASE_URL=postgresql://USER:PASSWORD@ep-XXXX.region.aws.neon.tech/neondb?sslmode=require
+
+# Opcionales
+# DEBUG=true
+# PORT=8000
+</pre>
+
+<h2>12. Arbol de Archivos del Proyecto</h2>
+
+<pre>
+pdf-voice-ai/
+├── run.py                  # Entry point: uvicorn app.main:app
+├── requirements.txt        # 19 dependencias
+├── README.md
+├── NEON.md                 # Guía de configuración Neon
+├── PUSH_REMAINING.md       # Instrucciones de push a GitHub
+├── ARCHITECTURE.html        # Este documento
+├── .env / .env.example     # Configuración (no commitear .env)
+├── .gitignore
+├── sql/
+│   └── schema.sql          # Script SQL de referencia (pgvector)
+├── app/
+│   ├── __init__.py
+│   ├── config.py            # Settings (pydantic-settings)
+│   ├── db.py                # Conexión Neon + init_db
+│   ├── schemas.py           # Pydantic models
+│   ├── main.py              # FastAPI app + rutas
+│   ├── ai/
+│   │   ├── __init__.py
+│   │   ├── base.py          # BaseAIProvider (ABC)
+│   │   ├── factory.py       # AIProviderFactory
+│   │   ├── gemini_provider.py
+│   │   └── openai_compatible.py  # DeepSeek + GLM
+│   ├── racks/
+│   │   ├── __init__.py
+│   │   └── manager.py       # RackManager (CRUD proyectos + cuadernos)
+│   ├── documents/
+│   │   ├── __init__.py
+│   │   └── manager.py       # DocumentManager (ingesta + búsqueda vectorial)
+│   └── templates/
+│       ├── __init__.py
+│       ├── catalog.py       # 4 plantillas built-in
+│       └── generator.py     # ProjectGenerator (plantillas + IA)
+├── static/
+│   ├── index.html           # Frontend SPA
+│   ├── css/
+│   │   └── styles.css       # Estilos mobile-first
+│   └── js/
+│       └── app.js           # Lógica de la app (833 líneas)
+├── tests/
+│   └── test_app.py          # Tests (config, schemas, endpoints)
+└── .kilo/                  # Configuración de agente (worktrees, agent-manager)
+
+<h2>13. Distribución de Código por Módulo</h2>
+<canvas id="moduleChart" height="80"></canvas>
+
+<h2>14. Cobertura de Endpoints por Tag</h2>
+<canvas id="tagChart" height="80"></canvas>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+// Gráfico de pastel: líneas por módulo
+new Chart(document.getElementById('moduleChart'), {
+  type: 'doughnut',
+  data: {
+    labels: ['app/main.py', 'app/racks/manager.py', 'app/documents/manager.py', 'app/templates/catalog.py', 'static/js/app.js', 'static/css/styles.css', 'app/templates/generator.py', 'app/ai/*', 'app/schemas.py', 'Otros'],
+    datasets: [{
+      data: [414, 758, 607, 459, 833, 598, 243, 133, 188, 300],
+      backgroundColor: ['#3b82f6','#6366f1','#8b5cf6','#a855f7','#ec4899','#ef4444','#f59e0b','#10b981','#06b6d4','#64748b']
+    }]
+  },
+  options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+});
+
+// Gráfico de barras: endpoints por tag
+new Chart(document.getElementById('tagChart'), {
+  type: 'bar',
+  data: {
+    labels: ['Projects', 'Notebooks', 'Documents', 'Chat', 'Templates', 'System'],
+    datasets: [{
+      data: [5, 5, 1, 1, 4, 1],
+      backgroundColor: ['#3b82f6','#6366f1','#8b5cf6','#ec4899','#10b981','#64748b']
+    }]
+  },
+  options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, precision: 1 } } }
+});
+</script>
+
+<h2>15. Estado del Repositorio</h2>
+<table>
+<tr><th>Aspecto</th><th>Valor</th></tr>
+<tr><td>Rama actual</td><td><code>main</code></td></tr>
+<tr><td>Commits</td><td>22 (último: <em>Add app/db.py Neon connection and schema bootstrap</em>)</td></tr>
+<tr><td>Remoto</td><td><code>origin/main</code></td></tr>
+<tr><td> Cambios sin commitear</td><td>11 archivos modificados (Neon/pgvector integration) + <code>tests/</code> sin seguir</td></tr>
+<tr><td>Worktree activo</td><td><code>cliff-acorn</code> (.kilo/worktrees/)</td></tr>
+</table>
+
+<p><em>Documento generado el 11 de octubre de 2026.</em></p>
+</body>
+</html>

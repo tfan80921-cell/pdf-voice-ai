@@ -2,6 +2,7 @@
 .venv/
 venv/
 __pycache__/
+.pytest_cache/
 *.py[cod]
 *.egg-info/
 .eggs/
@@ -22,3 +23,5 @@ racks.json
 .vscode/
 .DS_Store
 *.log
+.neon
+.env.local
