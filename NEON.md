@@ -48,7 +48,7 @@ python run.py
 curl http://localhost:8000/api/health
 ```
 
-Si no configuras `DATABASE_URL`, la app sigue funcionando localmente con JSON y ChromaDB.
+La aplicación es **Neon-only**: no hay fallback local a JSON ni ChromaDB. Si `DATABASE_URL` está vacío, `init_db()` no crea el engine y los endpoints de persistencia fallan con `DB not initialized`.
 
 ## QA automatizado
 

@@ -257,7 +257,6 @@ class DocumentManager:
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
         if len(text) <= settings.CHUNK_SIZE:
             return [text] if text else []
-
         chunks: list[str] = []
         start = 0
         while start < len(text):
